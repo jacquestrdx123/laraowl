@@ -33,5 +33,7 @@
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="NIGHTWATCH_ENABLED" value="false"/>
         <env name="ALLOW_REGISTRATION" value="true"/>
+        <!-- Sampling is exercised by its own tests; everywhere else every record is stored. -->
+        <env name="LARAOWL_RECORDS_SAMPLE_RATES" value=""/>
     </php>
 </phpunit>

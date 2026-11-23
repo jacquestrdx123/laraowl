@@ -18,6 +18,8 @@ class IngestService
 
     protected RollupWriter $rollupWriter;
 
+    protected RecordSampler $sampler;
+
     /**
      * Cached for the lifetime of one ingest call.
      *
@@ -25,11 +27,12 @@ class IngestService
      */
     protected ?array $thresholds = null;
 
-    public function __construct(AlertService $alertService, SecurityService $securityService, RollupWriter $rollupWriter)
+    public function __construct(AlertService $alertService, SecurityService $securityService, RollupWriter $rollupWriter, ?RecordSampler $sampler = null)
     {
         $this->alertService = $alertService;
         $this->securityService = $securityService;
         $this->rollupWriter = $rollupWriter;
+        $this->sampler = $sampler ?? new RecordSampler;
     }
 
     /**
@@ -49,7 +52,7 @@ class IngestService
                     continue;
                 }
 
-                $record = $project->records()->create([
+                $attributes = [
                     'type' => $type,
                     'payload' => $data,
                     'fingerprint' => $this->calculateFingerprint($type, $data),
@@ -58,7 +61,14 @@ class IngestService
                     'trace_id' => $this->rollupWriter->traceIdFor($data),
                     'message' => $this->rollupWriter->messageFor($type, $data),
                     'created_at' => now(),
-                ]);
+                ];
+
+                // A sampled-out record is still counted in the rollups below
+                // and still checked against thresholds; it just isn't stored,
+                // unless a threshold breach needs it as evidence.
+                $record = $this->sampler->shouldStore($project, $type, $data)
+                    ? $project->records()->create($attributes)
+                    : $project->records()->make($attributes);
 
                 $batch[] = [
                     'type' => $type,
@@ -200,7 +210,10 @@ class IngestService
             'message' => $message, // Update with latest duration
         ]);
 
-        $record->update(['issue_id' => $issue->id]);
+        // save() rather than update(): a sampled-out record was never
+        // inserted, and a breach is exactly the one worth keeping.
+        $record->issue_id = $issue->id;
+        $record->save();
 
         $this->alertService->notifySlowPerformance($issue);
     }
