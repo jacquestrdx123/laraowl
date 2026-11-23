@@ -12,6 +12,7 @@ use App\Models\RecordUserBucket;
 use App\Services\RollupWriter;
 use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -49,7 +50,17 @@ class BackfillRollups extends Command
         $chunkSize = max(1, (int) $this->option('chunk'));
 
         foreach ($projects as $project) {
-            $this->rebuild($project, $rollupWriter, $since, $until, $chunkSize);
+            // A project with no rollups yet has nothing to lose; any other
+            // rebuild must not reach back past what raw retention still holds.
+            $projectSince = $this->option('missing') ? $since : $this->clampToRetention($project, $since);
+
+            $this->rebuild($project, $rollupWriter, $projectSince, $until, $chunkSize);
+        }
+
+        $sampled = array_keys(array_filter(config('laraowl.records.sampling.rates', []), fn ($rate) => (float) $rate < 1));
+
+        if ($sampled !== []) {
+            $this->warn('Raw records of type '.implode(', ', $sampled).' are sampled at ingest, so rebuilt rollups undercount them.');
         }
 
         $this->newLine();
@@ -80,6 +91,35 @@ class BackfillRollups extends Command
         }
 
         return Project::all();
+    }
+
+    /**
+     * The rebuild discards the rollups in its range and replays raw records,
+     * so a range that reaches past raw retention would replace months of
+     * rollups with the few days of records that survive. Start no earlier
+     * than the first whole hour inside the shortest retention window.
+     */
+    protected function clampToRetention(Project $project, ?string $since): ?string
+    {
+        $days = array_filter([
+            (int) config('laraowl.records.retention_days', 7),
+            (int) $project->retention_days,
+            ...array_map('intval', config('laraowl.records.type_retention_days', [])),
+        ], fn (int $day) => $day > 0);
+
+        if ($days === []) {
+            return $since;
+        }
+
+        $floor = now()->subDays(min($days))->addHour()->startOfHour();
+
+        if ($since !== null && Carbon::parse($since)->gte($floor)) {
+            return $since;
+        }
+
+        $this->line("  {$project->slug}: rebuilding from {$floor->toDateTimeString()}; older raw records may already be pruned");
+
+        return $floor->toDateTimeString();
     }
 
     protected function rebuild(Project $project, RollupWriter $rollupWriter, ?string $since, ?string $until, int $chunkSize): void

@@ -643,27 +643,20 @@ class RecordService
     }
 
     /**
-     * Search the FULLTEXT-indexed `message` column.
+     * Search the `message` column.
      *
-     * Uses the index on MySQL/MariaDB and PostgreSQL. FULLTEXT ignores tokens
-     * shorter than its minimum length, and SQLite has no such index, so those
-     * cases fall back to a LIKE over the same narrow column — still far cheaper
-     * than scanning the JSON payload.
+     * A LIKE over the narrow `message` column rather than the JSON payload.
+     * The query is already bounded to one project's logs in the selected
+     * period by the `(project_id, type, created_at)` index, and raw records
+     * are only kept for days. The FULLTEXT index that used to back this was
+     * dropped: it taxed every insert and stalled ingest for 40+ minutes while
+     * InnoDB rebuilt its cache after a restart.
      *
      * @param  Builder<Record>|HasMany<Record, Project>  $query
      */
     protected function applyMessageSearch($query, string $search): void
     {
-        $term = trim($search);
-        $driver = DB::connection()->getDriverName();
-
-        if ($term !== '' && mb_strlen($term) >= 3 && in_array($driver, ['mysql', 'mariadb', 'pgsql'], true)) {
-            $query->whereFullText('message', $term);
-
-            return;
-        }
-
-        $query->where('message', 'like', '%'.$term.'%');
+        $query->where('message', 'like', '%'.trim($search).'%');
     }
 
     /**
