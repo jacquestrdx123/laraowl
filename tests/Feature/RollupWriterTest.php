@@ -4,6 +4,7 @@ use App\Models\Project;
 use App\Models\RecordRollup;
 use App\Services\IngestService;
 use App\Services\RollupWriter;
+use Illuminate\Support\Facades\DB;
 
 function rollupFor(Project $project, string $type): ?RecordRollup
 {
@@ -181,4 +182,44 @@ test('every additive column is a real column on the rollup table', function () {
     foreach (RollupWriter::additiveColumns() as $column) {
         expect($rollup->getAttributes())->toHaveKey($column);
     }
+});
+
+test('a sublabel longer than the TEXT column is cut to fit', function () {
+    $sql = 'select '.str_repeat('é', 40000).' from users';
+
+    [, $sublabel] = app(RollupWriter::class)->groupLabelsFor('query', ['sql' => $sql]);
+
+    expect(strlen($sublabel))->toBeLessThanOrEqual(RollupWriter::SUBLABEL_MAX_BYTES)
+        ->and(mb_check_encoding($sublabel, 'UTF-8'))->toBeTrue()
+        ->and(str_starts_with($sql, $sublabel))->toBeTrue();
+});
+
+test('a query too long for the sublabel column still ingests', function () {
+    $project = Project::factory()->create();
+
+    ingestRecords($project, [
+        ['t' => 'query', 'sql' => 'insert into t values '.str_repeat('(1),', 30000).'(1)', 'duration' => 5],
+    ]);
+
+    expect(rollupFor($project, 'query')->count)->toBe(1);
+});
+
+test('rows are written in unique key order whatever order the batch arrives in', function () {
+    $project = Project::factory()->create();
+    $queries = [];
+    DB::listen(function ($query) use (&$queries) {
+        if (str_starts_with($query->sql, 'insert into "record_rollups"') || str_starts_with($query->sql, 'insert into `record_rollups`')) {
+            $queries[] = $query->bindings;
+        }
+    });
+
+    ingestRecords($project, [
+        ['t' => 'request', 'status_code' => 200],
+        ['t' => 'exception', 'class' => 'E', 'message' => 'm'],
+        ['t' => 'cache-event', 'key' => 'k'],
+    ]);
+
+    $types = array_values(array_filter($queries[0], fn ($v) => in_array($v, ['request', 'exception', 'cache-event'], true)));
+
+    expect($types)->toBe(['cache-event', 'exception', 'request']);
 });

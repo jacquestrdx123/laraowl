@@ -27,6 +27,11 @@ class RollupWriter
     /**
      * The prefix the client gives anonymous visitors instead of a null user.
      */
+    /**
+     * The byte limit of the TEXT sublabel column on record_group_rollups.
+     */
+    public const SUBLABEL_MAX_BYTES = 65535;
+
     public const GUEST_ID_PREFIX = 'guest_';
 
     /**
@@ -226,9 +231,12 @@ class RollupWriter
             default => [null, null],
         };
 
+        // label is varchar(255); sublabel is a TEXT column, which holds at
+        // most 65,535 bytes. A long SQL statement or exception message can be
+        // bigger than that, and MySQL then fails the whole ingest batch.
         return [
             $label === null ? null : mb_substr($label, 0, 255),
-            $sublabel,
+            $sublabel === null ? null : mb_strcut($sublabel, 0, static::SUBLABEL_MAX_BYTES, 'UTF-8'),
         ];
     }
 
@@ -462,6 +470,21 @@ class RollupWriter
         if ($rows === []) {
             return;
         }
+
+        // Concurrent ingest workers upsert the same hot rows (one per project,
+        // type and minute). Sorting by the unique key makes every worker lock
+        // those rows in the same order, so two batches can't deadlock.
+        usort($rows, function (array $a, array $b) use ($conflict): int {
+            foreach ($conflict as $column) {
+                $order = strcmp((string) $a[$column], (string) $b[$column]);
+
+                if ($order !== 0) {
+                    return $order;
+                }
+            }
+
+            return 0;
+        });
 
         $connection = DB::connection();
         $grammar = $connection->getQueryGrammar();

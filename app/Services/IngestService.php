@@ -16,6 +16,13 @@ class IngestService
 
     protected SecurityService $securityService;
 
+    /**
+     * How many times an ingest batch is retried when MySQL picks it as a
+     * deadlock victim. Laravel only retries the closure on concurrency errors
+     * (deadlocks, lock wait timeouts), and the rollback undoes the earlier try.
+     */
+    public const TRANSACTION_ATTEMPTS = 5;
+
     protected RollupWriter $rollupWriter;
 
     protected RecordSampler $sampler;
@@ -117,7 +124,7 @@ class IngestService
             if ($exceptions > 0) {
                 $this->detectErrorSpike($project);
             }
-        });
+        }, attempts: static::TRANSACTION_ATTEMPTS);
 
         ProjectDataIngested::dispatch($project);
     }
